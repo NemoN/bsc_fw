@@ -677,10 +677,12 @@ void task_ble(void *param)
 {
   BSC_LOGD(TAG, "-> 'task_ble' runs on core %d", xPortGetCoreID());
 
+#if defined(ENABLE_LEGACY_NEEY_BLE)
   //init Bluetooth
   BSC_LOGI(TAG, "Init BLE...");
-  //#### bleHandler.init();
+  bleHandler.init();
   BSC_LOGI(TAG, "Init BLE...ok");
+#endif
 
   for(;;)
   {
@@ -694,7 +696,9 @@ void task_ble(void *param)
   {
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    //#### if(WlanStaApOk!=WIFI_OFF) bleHandler.run();
+    #if defined(ENABLE_LEGACY_NEEY_BLE)
+    if(WlanStaApOk!=WIFI_OFF) bleHandler.run();
+    #endif
 
     xSemaphoreTake(mutexTaskRunTime_ble, portMAX_DELAY);
     lastTaskRun_ble=millis();
@@ -911,10 +915,17 @@ void handle_paramBluetooth()
   if (server.hasArg("SAVE"))
   {
     changeAlarmSettings();
+
+    #if !defined(ENABLE_LEGACY_NEEY_BLE)
     extManager.getBt().sendDataAfterParameterChange();
+    #endif
   }
 
+  #if defined(ENABLE_LEGACY_NEEY_BLE)
+  bleHandler.startScan();
+  #else
   extManager.getBt().startBtScan();
+  #endif
 }
 
 void handle_paramOnewire2(){webSettingsOnewire2.handleHtmlFormRequest(&server);}
@@ -997,7 +1008,12 @@ void handle_paramDeviceMapping()
 void handle_paramDevicesNeeyBalancer()
 {
   webSettingsDeviceNeeyBalancer.handleHtmlFormRequest(&server);
+
+  #if defined(ENABLE_LEGACY_NEEY_BLE)
+  bleHandler.readDataFromNeey();
+  #else
   extManager.getBt().getNeeySettings(); 
+  #endif
 }
 void handle_getNeeySettingsReadback()
 {
@@ -1114,9 +1130,14 @@ void handle_getBtDevices()
 {
   if(!performAuthentication(server, webSettingsSystem)) return;
 
+  #if defined(ENABLE_LEGACY_NEEY_BLE)
+  bleHandler.startScan();
+  server.send(200, "text/html", bleHandler.getBtScanResultAsHtmlTable().c_str());
+  #else
   extManager.getBt().startBtScan();
   extManager.getBt().getScanBtMACs();
   server.send(200, "text/html", extManager.getBt().getBtScanResultAsHtmlTable().c_str());
+  #endif
 }
 
 
@@ -1147,13 +1168,19 @@ void btnEnableChargingUndervoltage()
 
 void btnWriteNeeyData()
 {
+  #if defined(ENABLE_LEGACY_NEEY_BLE)
+  bleHandler.sendDataToNeey();
+  #else
   extManager.getBt().sendNeeySettings();
+  #endif
 }
 
 void btnReadNeeyData()
 {
   BSC_LOGD(TAG,"StartReadDataFromNeey");
-  //#### bleHandler.readDataFromNeey();
+  #if defined(ENABLE_LEGACY_NEEY_BLE)
+  bleHandler.readDataFromNeey();
+  #endif
 }
 
 
@@ -1392,6 +1419,7 @@ void setup()
   server.on("/settings/schnittstellen/ow2/",handle_paramOnewire2);
   server.on("/settings/schnittstellen/deviceMapping/",handle_paramDeviceMapping);
 
+  server.on("/settings/devices/neeyBalancer",handle_paramDevicesNeeyBalancer);
   server.on("/settings/devices/neeyBalancer/",handle_paramDevicesNeeyBalancer);
   server.on("/settings/devices/neeyBalancer/getNeeySettingsReadback",handle_getNeeySettingsReadback);
 

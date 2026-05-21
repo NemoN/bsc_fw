@@ -373,16 +373,19 @@ void WebSettings::handleHtmlFormRequest(WebServer * server)
     if (server->hasArg(F("BTN1")) && fn_mOnButton1)
     {
       fn_mOnButton1();
+      server->send(200, "text/plain", "OK");
       exit = true;
     }
     if (server->hasArg(F("BTN2")) && fn_mOnButton2)
     {
       fn_mOnButton2();
+      server->send(200, "text/plain", "OK");
       exit = true;
     }
     if (server->hasArg(F("BTN3")) && fn_mOnButton3)
     {
       fn_mOnButton3();
+      server->send(200, "text/plain", "OK");
       exit = true;
     }
 

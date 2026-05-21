@@ -1,6 +1,7 @@
 #include "OTAupdater.h"
 #include <Arduino.h>
 #include <Update.h>
+#include <esp_ota_ops.h>
 #include "log.h"
 #include "defines.h"
 
@@ -9,6 +10,18 @@ static const char *TAG = "OTA";
 OTAupdater otaUpdater;
 
 #define CHUNK_SIZE 51200
+
+
+static size_t getMaxOtaImageSize()
+{
+	const esp_partition_t* updatePartition = esp_ota_get_next_update_partition(nullptr);
+	if(updatePartition != nullptr)
+	{
+		return updatePartition->size;
+	}
+
+	return (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+}
 
 const char uploadFormV1[] PROGMEM = R"!^!(
 <!DOCTYPE HTML>
@@ -44,6 +57,9 @@ const char uploadFormV1[] PROGMEM = R"!^!(
   <div class="content">
 	<div><u>Installierte FW-Version:</u> <span id='FwVersion'></span><br>
   <span id='FwVersionHinweis'></span></div><br>
+	<div><u>Max. OTA-Größe:</u> <span id='maxOtaSize'>__MAX_OTA_SIZE_KB__ KB</span></div>
+	<div><u>Ausgewählte Datei:</u> <span id='selectedFileSize'>-</span></div>
+	<div id='fileSizeHint'></div><br>
 	<p><b>Aktuelles verfügbares Release (github)</b>
 	<div><u>FW-Version:</u> <span id='gitFwVersion'></span></div><br>
 	<div><u>Veröffentlicht am:</u> <span id='gitFwPublishedAt'></span></div><br>
@@ -63,7 +79,40 @@ const char uploadFormV1[] PROGMEM = R"!^!(
 
 <script>
   const progress = document.getElementById('progress');
+  const maxOtaSize = __MAX_OTA_SIZE__;
   var updateProgress=0;
+
+  function formatBytes(bytes)
+  {
+	if (bytes < 1024) return bytes + ' B';
+	if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+	return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  function updateSelectedFileInfo(file)
+  {
+	const selectedFileSize = document.getElementById('selectedFileSize');
+	const fileSizeHint = document.getElementById('fileSizeHint');
+
+	if (!file)
+	{
+	  selectedFileSize.innerHTML = '-';
+	  fileSizeHint.innerHTML = '';
+	  return;
+	}
+
+	selectedFileSize.innerHTML = formatBytes(file.size);
+
+	if (file.size > maxOtaSize)
+	{
+	  fileSizeHint.innerHTML = '<span style="color:#b00020;font-weight:bold;">Datei ist zu groß für OTA.</span>';
+	}
+	else
+	{
+	  const remaining = maxOtaSize - file.size;
+	  fileSizeHint.innerHTML = '<span style="color:#0b7a0b;font-weight:bold;">Datei passt. Reserve: ' + formatBytes(remaining) + '</span>';
+	}
+  }
 
   var domReady = function(callback)
   {
@@ -76,6 +125,7 @@ const char uploadFormV1[] PROGMEM = R"!^!(
 
     var myform = document.getElementById('upload_form');
     var filez  = document.getElementById('file');
+	filez.onchange = function() { updateSelectedFileInfo(filez.files[0]); };
 
     myform.onsubmit = function(event)
 	{
@@ -83,6 +133,11 @@ const char uploadFormV1[] PROGMEM = R"!^!(
 	  var formData = new FormData();
 	  var file     = filez.files[0];
       if (!file) { return false; }
+	  if (file.size > maxOtaSize)
+	  {
+		document.getElementById('status').innerHTML='<b>Datei ist zu groß für OTA.</b>';
+		return false;
+	  }
 
   	  getUpdateProgress();
 	  document.getElementById('status').innerHTML='<b>Update l&auml;uft...</b>';
@@ -108,8 +163,7 @@ const char uploadFormV1[] PROGMEM = R"!^!(
 		  progress.value = updateProgress;
 		  document.getElementById('status').innerHTML='<b>Update fertig! BSC wird neu gestartet...</b>';
 		}else{
-		  //alert('An error occurred!');
-		  document.getElementById('status').innerHTML='<b>An error occurred!</b>';
+		  document.getElementById('status').innerHTML='<b>Update fehlgeschlagen.</b>';
 		}
 	  };
 	  xhr.send(formData);
@@ -196,6 +250,9 @@ void OTAupdater::setHttpRoutes(WebServer *server, WebSettings *webSettings, cons
 		{
       if(!performAuthentication(server, webSettings)) return;
 			String html = FPSTR(uploadFormV1);
+			size_t maxOtaImageSize = getMaxOtaImageSize();
+			html.replace("__MAX_OTA_SIZE__", String(maxOtaImageSize));
+			html.replace("__MAX_OTA_SIZE_KB__", String(maxOtaImageSize / 1024));
 			server->send_P(200, "text/html", html.c_str());
 		});
 	}
@@ -205,35 +262,47 @@ void OTAupdater::setHttpRoutes(WebServer *server, WebSettings *webSettings, cons
 	{
     if(!performAuthentication(server, webSettings)) return;
 
-		server->send(200, "text/plain", (Update.hasError()) ? "Update: fail\n" : "Update: OK\n");
+		server->send((Update.hasError()) ? 500 : 200, "text/plain", (Update.hasError()) ? "Update: fail\n" : "Update: OK\n");
 		delayWithHandleClient(server, 1000);
-		ESP.restart();
+		if(!Update.hasError())
+		{
+			ESP.restart();
+		}
 	},
 	[server, webSettings, this]()
 	{
     if(!performAuthentication(server, webSettings)) return;
 
 		HTTPUpload& upload = server->upload();
+		static uint32_t nextInfoSize = CHUNK_SIZE;
+		static size_t maxOtaImageSize = 0;
 
 		if(upload.status == UPLOAD_FILE_START)
 		{
-			BSC_LOGI(TAG,"Firmware update initiated: %s",upload.filename.c_str());
-			uint32_t sketchSize = (ESP.getFreeSketchSpace()-0x1000) & 0xFFFFF000;
+			nextInfoSize = CHUNK_SIZE;
+			maxOtaImageSize = getMaxOtaImageSize();
+			BSC_LOGI(TAG,"Firmware update initiated: %s, max OTA size=%u bytes", upload.filename.c_str(), maxOtaImageSize);
 
-			if(!Update.begin(sketchSize))
+			if(!Update.begin(maxOtaImageSize, U_FLASH))
 			{
-				BSC_LOGI(TAG,"Firmware update:", Update.errorString());
+				BSC_LOGE(TAG,"Firmware update begin failed: %s", Update.errorString());
 			}
 		}
 		else if(upload.status == UPLOAD_FILE_WRITE)
 		{
+			if(maxOtaImageSize > 0 && upload.totalSize > maxOtaImageSize)
+			{
+				BSC_LOGE(TAG, "Firmware too large for OTA partition: received=%u, max=%u", upload.totalSize, maxOtaImageSize);
+				Update.abort();
+				return;
+			}
+
 			if(Update.write(upload.buf, upload.currentSize) != upload.currentSize) // if error
 			{
-				BSC_LOGI(TAG,"Firmware update:", Update.errorString());
+				BSC_LOGE(TAG,"Firmware update write failed at %u bytes: %s", upload.totalSize, Update.errorString());
 			}
 
 			// Print info all 100k
-			static uint32_t nextInfoSize = CHUNK_SIZE;
 			if(upload.totalSize >= nextInfoSize)
 			{
 				BSC_LOGI(TAG,"%d k ",nextInfoSize/1024);
@@ -242,13 +311,20 @@ void OTAupdater::setHttpRoutes(WebServer *server, WebSettings *webSettings, cons
 		}
 		else if(upload.status == UPLOAD_FILE_END)
 		{
+			if(maxOtaImageSize > 0 && upload.totalSize > maxOtaImageSize)
+			{
+				BSC_LOGE(TAG,"Firmware update rejected: image too large (%u > %u bytes)", upload.totalSize, maxOtaImageSize);
+				Update.abort();
+				return;
+			}
+
 			if(Update.end(true))
 			{
-				BSC_LOGI(TAG,"Firmware update successful: %u bytes;\nRebooting...", upload.totalSize);
+				BSC_LOGI(TAG,"Firmware update successful: %u bytes; max OTA size=%u bytes; Rebooting...", upload.totalSize, maxOtaImageSize);
 			}
 			else
 			{
-				BSC_LOGI(TAG,"Firmware update:", Update.errorString());
+				BSC_LOGE(TAG,"Firmware update finalize failed after %u bytes: %s", upload.totalSize, Update.errorString());
 			}
 		}
 	});

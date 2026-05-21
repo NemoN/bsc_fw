@@ -9,7 +9,11 @@
 #include "params_dt.h"
 #include "bscTime.h"
 
+#if defined(ENABLE_LEGACY_NEEY_BLE)
+#define BSC_SW_VERSION      "V0.7.15-NEEY-LEGACY"
+#else
 #define BSC_SW_VERSION      "V0.7.15"
+#endif
 
 static const char COMPILE_DATE_TIME[] = "";
 
@@ -143,6 +147,8 @@ const uint8_t GPIO_OUT[] = {40, 39, 42, 41, 1, 2}; // 0..5
 //Bluetooth
 #define BT_DEVICES_COUNT              7
 #define BT_EXT_DEVICES_COUNT          5
+#define BT_SCAN_RESULTS               5
+#define BT_SCAN_AND_NOT_CONNECT_TIME 11 //seconds
 
 //Serial
 #define SERIAL_BMS_DEVICES_COUNT      11
